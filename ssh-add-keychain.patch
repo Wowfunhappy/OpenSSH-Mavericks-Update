@@ -1,0 +1,171 @@
+--- ssh-add.c.original	2025-10-02 11:41:33.000000000 -0700
++++ ssh-add.c	2025-10-02 12:10:49.000000000 -0700
+@@ -70,6 +70,12 @@
+ #include "sk-api.h"
+ #include "hostfile.h"
+ 
++#ifdef __APPLE_KEYCHAIN__
++#include <getopt.h>
++#include "keychain.h"
++static int use_keychain = 0;
++#endif
++
+ /* argv0 */
+ extern char *__progname;
+ 
+@@ -120,6 +126,12 @@
+ {
+ 	int r;
+ 
++#ifdef __APPLE_KEYCHAIN__
++	if (use_keychain && path != NULL) {
++		remove_from_keychain(path);
++	}
++#endif
++
+ 	if ((r = ssh_remove_identity(agent_fd, key)) != 0) {
+ 		fprintf(stderr, "Could not remove identity \"%s\": %s\n",
+ 		    path, ssh_err(r));
+@@ -248,7 +260,7 @@
+     struct dest_constraint **dest_constraints,
+     size_t ndest_constraints)
+ {
+-	struct sshkey *private, *cert;
++	struct sshkey *private = NULL, *cert = NULL;
+ 	char *comment = NULL;
+ 	char msg[1024], *certpath = NULL;
+ 	int r, fd, ret = -1;
+@@ -284,6 +296,24 @@
+ 	}
+ 	close(fd);
+ 
++#ifdef __APPLE_KEYCHAIN__
++	/* Try reading from keychain first if enabled */
++	if (use_keychain && private == NULL) {
++		pass = keychain_read_passphrase(filename);
++		if (pass != NULL) {
++			if ((r = sshkey_parse_private_fileblob(keyblob, pass, &private,
++			    &comment)) == 0) {
++				/* Successfully loaded key from keychain */
++				goto loaded_from_keychain;
++			}
++			/* Wrong passphrase in keychain, clear it */
++			if (r == SSH_ERR_KEY_WRONG_PASSPHRASE) {
++				clear_pass();
++			}
++		}
++	}
++#endif
++
+ 	/* At first, try empty passphrase */
+ 	if ((r = sshkey_parse_private_fileblob(keyblob, "", &private,
+ 	    &comment)) != 0 && r != SSH_ERR_KEY_WRONG_PASSPHRASE) {
+@@ -299,6 +329,12 @@
+ 			    filename, ssh_err(r));
+ 			goto fail_load;
+ 		}
++#ifdef __APPLE_KEYCHAIN__
++		else if (use_keychain && private != NULL) {
++			/* Successfully loaded with pass, store in keychain */
++			store_in_keychain(filename, pass);
++		}
++#endif
+ 	}
+ 	if (private == NULL) {
+ 		/* clear passphrase since it did not work */
+@@ -310,8 +346,13 @@
+ 			if (strcmp(pass, "") == 0)
+ 				goto fail_load;
+ 			if ((r = sshkey_parse_private_fileblob(keyblob, pass,
+-			    &private, &comment)) == 0)
++			    &private, &comment)) == 0) {
++#ifdef __APPLE_KEYCHAIN__
++				if (use_keychain && private != NULL)
++					store_in_keychain(filename, pass);
++#endif
+ 				break;
++			}
+ 			else if (r != SSH_ERR_KEY_WRONG_PASSPHRASE) {
+ 				fprintf(stderr,
+ 				    "Error loading key \"%s\": %s\n",
+@@ -327,6 +368,9 @@
+ 			    confirm ? " (will confirm each use)" : "");
+ 		}
+ 	}
++#ifdef __APPLE_KEYCHAIN__
++loaded_from_keychain:
++#endif
+ 	if (comment == NULL || *comment == '\0')
+ 		comment = xstrdup(filename);
+ 	sshbuf_free(keyblob);
+@@ -801,6 +845,10 @@
+ "       ssh-add -s pkcs11 [-Cv] [certificate ...]\n"
+ "       ssh-add -e pkcs11\n"
+ "       ssh-add -T pubkey ...\n"
++#ifdef __APPLE_KEYCHAIN__
++"       ssh-add --apple-use-keychain [file ...]\n"
++"       ssh-add --apple-load-keychain\n"
++#endif
+ 	);
+ }
+ 
+@@ -846,7 +894,18 @@
+ 
+ 	skprovider = getenv("SSH_SK_PROVIDER");
+ 
++#ifdef __APPLE_KEYCHAIN__
++	int load_keychain = 0;
++	struct option longopts[] = {
++		{ "apple-use-keychain", no_argument, &use_keychain, 1 },
++		{ "apple-load-keychain", no_argument, &load_keychain, 1 },
++		{ NULL, 0, NULL, 0 }
++	};
++	while ((ch = getopt_long(argc, argv, "vkKlLCcdDTxXE:e:h:H:M:m:qs:S:t:",
++				  longopts, NULL)) != -1) {
++#else
+ 	while ((ch = getopt(argc, argv, "vkKlLCcdDTxXE:e:h:H:M:m:qs:S:t:")) != -1) {
++#endif
+ 		switch (ch) {
+ 		case 'v':
+ 			if (log_level == SYSLOG_LEVEL_INFO)
+@@ -935,6 +994,11 @@
+ 		case 'T':
+ 			Tflag = 1;
+ 			break;
++#ifdef __APPLE_KEYCHAIN__
++		case 0:
++			/* Long option handled by getopt_long */
++			break;
++#endif
+ 		default:
+ 			usage();
+ 			ret = 1;
+@@ -943,6 +1007,28 @@
+ 	}
+ 	log_init(__progname, log_level, log_facility, 1);
+ 
++#ifdef __APPLE_KEYCHAIN__
++	/* Handle --apple-load-keychain to load all SSH keys from Keychain */
++	if (load_keychain) {
++#ifdef __BLOCKS__
++		/* Use Apple's block-based API to load all identities */
++		ret = load_identities_from_keychain(^(const char *filename) {
++			return add_file(agent_fd, filename, 0, 0, qflag, skprovider,
++					dest_constraints, ndest_constraints);
++		});
++		if (ret != 0) {
++			fprintf(stderr, "Failed to load identities from keychain\n");
++			ret = 1;
++		}
++		goto done;
++#else
++		fprintf(stderr, "apple-load-keychain requires block support (compile with clang)\n");
++		ret = 1;
++		goto done;
++#endif
++	}
++#endif
++
+ 	if ((xflag != 0) + (lflag != 0) + (Dflag != 0) > 1)
+ 		fatal("Invalid combination of actions");
+ 	else if (xflag) {

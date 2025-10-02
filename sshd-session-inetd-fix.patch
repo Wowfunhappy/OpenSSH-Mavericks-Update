@@ -1,0 +1,27 @@
+--- sshd-session.c.original	2025-10-02 11:29:28.000000000 -0700
++++ sshd-session.c	2025-10-02 11:29:28.000000000 -0700
+@@ -1028,6 +1028,15 @@
+ 		exit(1);
+ 	}
+ 
++	/*
++	 * In inetd mode, there's no parent process to signal via startup_pipe.
++	 * Close REEXEC_STARTUP_PIPE_FD immediately to prevent any library
++	 * functions (like getpwnam/endpwent) from accidentally reusing this fd.
++	 */
++	if (inetd_flag) {
++		close(REEXEC_STARTUP_PIPE_FD);
++	}
++
+ 	debug("sshd version %s, %s", SSH_VERSION, SSH_OPENSSL_VERSION);
+ 
+ 	if (!rexeced_flag)
+@@ -1087,7 +1096,7 @@
+ 	}
+ 	endpwent();
+ 
+-	if (!debug_flag) {
++	if (!debug_flag && !inetd_flag) {
+ 		startup_pipe = dup(REEXEC_STARTUP_PIPE_FD);
+ 		close(REEXEC_STARTUP_PIPE_FD);
+ 		/*
