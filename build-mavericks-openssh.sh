@@ -105,6 +105,20 @@ then
     exit 1
 fi
 
+if [ -f "$BUILD_DIR/ssh-agent-launchd.patch" ]
+then
+    cp "$BUILD_DIR/ssh-agent-launchd.patch" .
+else
+    echo "ERROR: ssh-agent-launchd.patch not found in $BUILD_DIR"
+    exit 1
+fi
+patch -p0 < ssh-agent-launchd.patch
+if [ $? -ne 0 ]
+then
+    echo "ERROR: Failed to apply launchd patch to ssh-agent.c"
+    exit 1
+fi
+
 echo ""
 echo "Configuring OpenSSH..."
 
